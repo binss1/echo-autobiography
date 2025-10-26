@@ -2,7 +2,59 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core';
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import type { Chapter } from '@/types/chapter';
+
+interface SortableItemProps {
+  chapter: Chapter;
+  onView: (chapterId: string) => void;
+}
+
+function SortableItem({ chapter, onView }: SortableItemProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: chapter.id,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <div className="bg-white dark:bg-gray-800 rounded-lg border p-6 hover:shadow-lg transition-shadow cursor-move">
+        <div className="flex items-start justify-between">
+          <div className="flex items-start gap-4 flex-1" {...attributes} {...listeners}>
+            <div className="text-2xl mt-1">⋮⋮</div>
+            <div className="flex-1">
+              <h3 className="text-2xl font-bold text-contrast mb-2">{chapter.title}</h3>
+              <div className="text-sm text-gray-500 mb-3">
+                순서: {chapter.order}
+              </div>
+              <p className="text-base text-gray-700 dark:text-gray-300 line-clamp-3">
+                {typeof chapter.content_draft === 'string'
+                  ? chapter.content_draft
+                  : JSON.stringify(chapter.content_draft)}
+              </p>
+              <div className="mt-4 text-xs text-gray-500">
+                {new Date(chapter.created_at).toLocaleDateString('ko-KR')}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => onView(chapter.id)}
+            className="ml-4 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px] font-medium"
+          >
+            자세히 보기
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function ChaptersPage({ params }: { params: { id: string } }) {
   const router = useRouter();
@@ -10,6 +62,14 @@ export default function ChaptersPage({ params }: { params: { id: string } }) {
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   useEffect(() => {
     fetchChapters();
@@ -24,12 +84,63 @@ export default function ChaptersPage({ params }: { params: { id: string } }) {
         throw new Error(data.error || '챕터를 불러오는데 실패했습니다.');
       }
 
-      setChapters(data.chapters);
+      // order 기준으로 정렬
+      const sortedChapters = [...data.chapters].sort((a, b) => a.order - b.order);
+      setChapters(sortedChapters);
     } catch (err) {
       setError(err instanceof Error ? err.message : '챕터를 불러오는데 실패했습니다.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+
+    if (!over || active.id === over.id) {
+      return;
+    }
+
+    const oldIndex = chapters.findIndex((c) => c.id === active.id);
+    const newIndex = chapters.findIndex((c) => c.id === over.id);
+
+    const newChapters = arrayMove(chapters, oldIndex, newIndex);
+
+    // 로컬 상태 업데이트
+    setChapters(newChapters);
+
+    // 서버에 순서 업데이트
+    setIsSaving(true);
+    try {
+      const updates = newChapters.map((chapter, index) => ({
+        id: chapter.id,
+        order: index,
+      }));
+
+      // 모든 챕터의 order를 업데이트
+      await Promise.all(
+        updates.map((update) =>
+          fetch(`/api/chapters/${update.id}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ order: update.order }),
+          })
+        )
+      );
+    } catch (err) {
+      console.error('Failed to update chapter order:', err);
+      alert('챕터 순서 업데이트에 실패했습니다.');
+      // 실패 시 원래 상태로 복원
+      fetchChapters();
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleViewChapter = (chapterId: string) => {
+    router.push(`/dashboard/projects/${projectId}/chapters/${chapterId}`);
   };
 
   if (loading) {
@@ -75,8 +186,9 @@ export default function ChaptersPage({ params }: { params: { id: string } }) {
             </div>
           </div>
 
-          <div className="text-sm text-gray-500">
-            총 {chapters.length}개의 챕터
+          <div className="flex items-center gap-4 text-sm text-gray-500">
+            <span>총 {chapters.length}개의 챕터</span>
+            {isSaving && <span className="text-blue-600">순서 저장 중...</span>}
           </div>
         </div>
 
@@ -95,39 +207,15 @@ export default function ChaptersPage({ params }: { params: { id: string } }) {
             </button>
           </div>
         ) : (
-          <div className="space-y-6">
-            {chapters.map((chapter) => (
-              <div
-                key={chapter.id}
-                className="bg-white dark:bg-gray-800 rounded-lg border p-6 hover:shadow-lg transition-shadow"
-              >
-                <div className="flex items-start justify-between mb-4">
-                  <h2 className="text-2xl font-bold text-contrast">
-                    {chapter.order}. {chapter.title}
-                  </h2>
-                  <span className="text-xs text-gray-500">
-                    {new Date(chapter.updated_at).toLocaleDateString('ko-KR')}
-                  </span>
-                </div>
-
-                {/* 간단한 텍스트 미리보기 */}
-                <div className="text-gray-600 dark:text-gray-300 whitespace-pre-wrap">
-                  {chapter.content_draft?.content?.[0]?.content?.map((item: any, idx: number) => 
-                    item.type === 'text' ? item.text : ''
-                  ).join('')}
-                </div>
-
-                <div className="mt-4 flex gap-4">
-                  <button
-                    onClick={() => router.push(`/dashboard/projects/${projectId}/chapters/${chapter.id}`)}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px] font-medium"
-                  >
-                    자세히 보기
-                  </button>
-                </div>
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={chapters.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              <div className="space-y-6">
+                {chapters.map((chapter) => (
+                  <SortableItem key={chapter.id} chapter={chapter} onView={handleViewChapter} />
+                ))}
               </div>
-            ))}
-          </div>
+            </SortableContext>
+          </DndContext>
         )}
       </div>
     </div>
