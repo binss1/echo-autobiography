@@ -9,6 +9,7 @@ export default function ProjectDetailPage({ params }: { params: { id: string } }
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
 
   useEffect(() => {
     fetchProject();
@@ -156,6 +157,42 @@ export default function ProjectDetailPage({ params }: { params: { id: string } }
             className="block w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 text-center min-h-[44px] flex items-center justify-center mb-4 font-medium text-lg"
           >
             ✨ AI 초안 생성하기
+          </button>
+
+          <button
+            onClick={async () => {
+              setIsGeneratingPdf(true);
+              try {
+                const response = await fetch(`/api/projects/${params.id}/generate-pdf`, {
+                  method: 'POST',
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                  alert(data.error || 'PDF 생성에 실패했습니다.');
+                  return;
+                }
+                
+                // Base64 PDF를 Blob으로 변환하여 다운로드
+                const pdfBlob = Uint8Array.from(atob(data.pdf), c => c.charCodeAt(0));
+                const blob = new Blob([pdfBlob], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = data.filename || '자서전.pdf';
+                a.click();
+                URL.revokeObjectURL(url);
+              } catch (error) {
+                alert('PDF 생성 중 오류가 발생했습니다.');
+              } finally {
+                setIsGeneratingPdf(false);
+              }
+            }}
+            disabled={isGeneratingPdf}
+            className="block w-full px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 text-center min-h-[44px] flex items-center justify-center mb-4 font-medium text-lg disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isGeneratingPdf ? '📄 PDF 생성 중...' : '📄 PDF 다운로드'}
           </button>
           
           <a
