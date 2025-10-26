@@ -3,7 +3,7 @@
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 interface TiptapEditorProps {
   content: any;
@@ -18,6 +18,7 @@ export function TiptapEditor({
   placeholder = '여기에 내용을 입력하세요...',
   editable = true,
 }: TiptapEditorProps) {
+  const [isRefining, setIsRefining] = useState(false);
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -36,6 +37,50 @@ export function TiptapEditor({
       },
     },
   });
+
+  const handleRefineText = async () => {
+    if (!editor || isRefining) return;
+
+    const selectedText = editor.state.doc.textBetween(
+      editor.state.selection.from,
+      editor.state.selection.to
+    );
+
+    if (!selectedText.trim()) {
+      alert('다듬을 텍스트를 선택해주세요.');
+      return;
+    }
+
+    setIsRefining(true);
+
+    try {
+      const response = await fetch('/api/ai/refine', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: selectedText,
+          tone: 'warm', // 따뜻한 톤
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || '문장 다듬기에 실패했습니다.');
+      }
+
+      // 선택된 텍스트를 다듬어진 텍스트로 교체
+      const { from, to } = editor.state.selection;
+      editor.chain().focus().insertContentAt({ from, to }, data.refinedText).run();
+    } catch (error) {
+      console.error('Refine error:', error);
+      alert(error instanceof Error ? error.message : '문장 다듬기에 실패했습니다.');
+    } finally {
+      setIsRefining(false);
+    }
+  };
 
   useEffect(() => {
     if (editor && content) {
@@ -139,6 +184,17 @@ export function TiptapEditor({
             title="번호 목록"
           >
             1.
+          </button>
+
+          <div className="border-l border-gray-300 dark:border-gray-600 mx-1" />
+
+          <button
+            onClick={handleRefineText}
+            disabled={isRefining}
+            className="px-3 py-2 rounded hover:bg-purple-100 dark:hover:bg-purple-900 bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 min-h-[36px] disabled:opacity-50 font-medium text-sm"
+            title="AI로 문장 다듬기 (텍스트 선택 후 클릭)"
+          >
+            ✨ {isRefining ? '다듬는 중...' : '문장 다듬기'}
           </button>
         </div>
       )}
