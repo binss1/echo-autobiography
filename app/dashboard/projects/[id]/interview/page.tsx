@@ -2,8 +2,12 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useChat } from 'ai/react';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 interface InterviewPageProps {
   params: {
@@ -14,7 +18,9 @@ interface InterviewPageProps {
 export default function InterviewPage({ params }: InterviewPageProps) {
   const router = useRouter();
   const [projectId] = useState(params.id);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [currentQuestion, setCurrentQuestion] = useState<string>('');
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -22,25 +28,10 @@ export default function InterviewPage({ params }: InterviewPageProps) {
   const { isListening, transcript, error: speechError, startListening, stopListening, clearTranscript } = 
     useSpeechRecognition({ language: 'ko-KR', continuous: true, interimResults: true });
 
-  const { messages, append, isLoading, setMessages } = useChat({
-    api: '/api/ai/chat',
-    body: { project_id: projectId },
-    onResponse: (response) => {
-      // AI 응답(질문) 저장
-      const lastMessage = messages[messages.length - 1];
-      if (lastMessage?.role === 'assistant') {
-        setCurrentQuestion(lastMessage.content);
-      }
-    },
-  });
-
   // 첫 로드 시 초기 질문 생성
   useEffect(() => {
     if (messages.length === 0) {
-      append({
-        role: 'user',
-        content: '안녕하세요. 자서전 작성을 시작하겠습니다.',
-      });
+      handleInitialQuestion();
     }
   }, []);
 
@@ -56,6 +47,76 @@ export default function InterviewPage({ params }: InterviewPageProps) {
     }
   }, [transcript]);
 
+  const handleInitialQuestion = async () => {
+    await appendMessage({
+      role: 'user',
+      content: '안녕하세요. 자서전 작성을 시작하겠습니다.',
+    });
+  };
+
+  const appendMessage = async (message: Message) => {
+    setMessages(prev => [...prev, message]);
+    
+    if (message.role === 'user') {
+      setIsLoading(true);
+      try {
+        const response = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            project_id: projectId,
+            conversation_history: [...messages, message].map(m => ({
+              role: m.role,
+              content: m.content,
+            })),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error('AI 응답 실패');
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let assistantContent = '';
+
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            assistantContent += chunk;
+            
+            // 스트리밍 중에도 메시지 업데이트
+            setMessages(prev => {
+              const updated = [...prev];
+              const lastMsg = updated[updated.length - 1];
+              if (lastMsg?.role === 'assistant') {
+                lastMsg.content = assistantContent;
+              } else {
+                updated.push({ role: 'assistant', content: assistantContent });
+              }
+              return updated;
+            });
+          }
+        }
+
+        setCurrentQuestion(assistantContent);
+      } catch (error) {
+        console.error('Failed to get AI response:', error);
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: '죄송합니다. 질문 생성 중 오류가 발생했습니다.',
+        }]);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+  };
+
   const handleSendAnswer = async (answer: string) => {
     if (!answer.trim() || isLoading) return;
 
@@ -63,7 +124,7 @@ export default function InterviewPage({ params }: InterviewPageProps) {
     await saveFragment(answer);
 
     // AI 챗에 답변 추가
-    await append({
+    await appendMessage({
       role: 'user',
       content: answer,
     });
@@ -90,14 +151,11 @@ export default function InterviewPage({ params }: InterviewPageProps) {
     }
   };
 
-  const handleStartOver = () => {
+  const handleStartOver = async () => {
     setMessages([]);
     setCurrentQuestion('');
     clearTranscript();
-    append({
-      role: 'user',
-      content: '안녕하세요. 자서전 작성을 시작하겠습니다.',
-    });
+    await handleInitialQuestion();
   };
 
   const handleMicClick = () => {
