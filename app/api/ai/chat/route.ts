@@ -2,8 +2,7 @@ import { createServerComponentClient } from '@supabase/auth-helpers-nextjs';
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { openai } from '@/lib/openai';
-import { streamText } from 'ai';
+import { OpenAI } from 'openai';
 import { searchRelevantContext } from '@/lib/rag';
 
 /**
@@ -48,17 +47,19 @@ export async function POST(request: NextRequest) {
 
     // 1. RAG: 관련 있는 과거 대화 검색 (최근 답변 3개)
     const recentAnswers = conversation_history
-      .filter((msg: any) => msg.role === 'user')
+      ?.filter((msg: any) => msg.role === 'user')
       .slice(-3)
       .map((msg: any) => msg.content)
-      .join(' ');
+      .join(' ') || '';
 
-    const ragContext = await searchRelevantContext(
-      user.id,
-      project_id,
-      recentAnswers || '자서전',
-      3 // 최대 3개의 관련 대화
-    );
+    const ragContext = recentAnswers 
+      ? await searchRelevantContext(
+          user.id,
+          project_id,
+          recentAnswers,
+          3 // 최대 3개의 관련 대화
+        )
+      : [];
 
     // 2. System Prompt 구성
     const systemPrompt = `당신은 친근하고 따뜻한 AI 인터뷰어입니다. 시니어 사용자에게 그들의 삶의 이야기를 자연스럽게 듣고 있습니다.
@@ -82,26 +83,55 @@ ${ragContext.length > 0
 
     // 3. Conversation History를 OpenAI 형식으로 변환
     const messages = [
-      { role: 'system' as const, content: systemPrompt },
-      ...conversation_history.map((msg: any) => ({
-        role: msg.role as 'user' | 'assistant',
+      { role: 'system', content: systemPrompt },
+      ...(conversation_history || []).map((msg: any) => ({
+        role: msg.role,
         content: msg.content,
       })),
     ];
 
-    // 4. OpenAI Streaming 응답 생성
-    const result = await streamText({
-      model: openai('gpt-4o-mini'),
-      messages,
-      temperature: 0.7,
-      maxTokens: 200,
+    // 4. OpenAI 직접 호출 (Streaming)
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
     });
 
-    return result.toDataStreamResponse();
+    const stream = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: messages as any,
+      temperature: 0.7,
+      max_tokens: 200,
+      stream: true,
+    });
+
+    // 5. Stream을 HTTP Response로 변환
+    const encoder = new TextEncoder();
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            if (content) {
+              controller.enqueue(encoder.encode(content));
+            }
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+    });
   } catch (error) {
     console.error('AI chat error:', error);
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: error instanceof Error ? error.message : 'Internal server error' },
       { status: 500 }
     );
   }
